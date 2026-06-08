@@ -1,0 +1,33 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+.venv/
+venv/
+
+# Claude Code internals
+.claude/
+
+# Eval / benchmark artifacts
+*-workspace/
+desc_opt/
+benchmark.json
+benchmark.md
+grading.json
+timing.json
+eval_metadata.json
