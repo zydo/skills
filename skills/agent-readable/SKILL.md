@@ -199,10 +199,19 @@ npx agent-readable-ts commander:Command
 
 # Local TypeScript file
 npx agent-readable-ts ./src/widget.ts:Widget
+
+# Package not installed in the current project: opt in to on-demand fetch
+npx agent-readable-ts --install left-pad
 ```
 
 The CLI mitigates TypeScript's runtime reflection limits by parsing `.ts` source
 directly or reading adjacent `.d.ts` declaration files for `.js` packages.
+
+Packages already installed in the project load directly. For anything else the
+CLI refuses to fetch unless you pass `--install`, which runs `npm install` with
+`--ignore-scripts` into an isolated cache (`~/.cache/agent-readable-ts`, override
+with `AGENT_READABLE_CACHE`) — never into the project's `node_modules`. Cached
+packages load offline without needing `--install` again.
 
 ### TypeScript runtime limitations
 
