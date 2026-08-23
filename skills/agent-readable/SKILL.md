@@ -14,6 +14,7 @@ behavioral rules — instead of guessing from stale training data.
 |---|---|---|
 | Library | `agent-readable` | `agent-readable-ts` |
 | Install | `pip install agent-readable` | `npm install agent-readable-ts` |
+| One-off, no install | `uvx agent-readable <target>` | `npx agent-readable-ts <target>` |
 | Inspect function | `agent_help(target)` | `agentHelp(target)` |
 | Author notes method | `__agent_notes__()` classmethod | `agentNotes()` method |
 | Custom output method | `__agent_help__()` | `agentHelper()` |
@@ -69,18 +70,28 @@ from agent_readable import agent_help
 
 print(agent_help(SomeClass))      # class — constructor, public API, notes
 print(agent_help(some_instance))  # instance — dispatches to its class
-print(agent_help(some_module))    # module — docstring + public functions/classes
+print(agent_help(some_module))    # module — docstring + public functions/classes/constants
 print(agent_help(some_func))      # function or method — signature + docstring
 ```
 
-From a shell:
+From a shell — zero-install one-off (uv fetches and caches the CLI):
 
 ```bash
-python -c "from agent_readable import agent_help; import target_lib; print(agent_help(target_lib.SomeClass))"
-# or via the CLI:
+uvx agent-readable sqlite3:Connection
+uvx agent-readable pathlib
+uvx agent-readable json:dumps
+uvx --with requests agent-readable requests:Session   # third-party target
+```
+
+pip-series equivalent: `pipx run --spec agent-readable agent-readable <target>`.
+
+These one-off environments cannot import the project's own code — for
+project-local classes use the installed CLI (or `python -c`) from the project
+environment:
+
+```bash
+agent-readable my_package.temperature:CalibratedSensor
 python -m agent_readable sqlite3:Connection
-python -m agent_readable pathlib
-python -m agent_readable json:dumps
 ```
 
 ### Reading the output
@@ -92,6 +103,11 @@ python -m agent_readable json:dumps
 | `## Purpose`, per-method summaries | docstrings | As accurate as the author's docstrings |
 | `## Agent usage rules` | library boilerplate | Generic guardrails; don't invent behavior |
 | `## Notes from class <X>` | `__agent_notes__()` | Behavioral guidance, if supplied and maintained |
+
+Attribute values are live too: public class attributes and module constants are
+listed with their current value (safe `repr` for exact primitives — a custom
+`__repr__` is never executed), enums list their members, and module docs include
+C builtins — so `agent_help(math)` shows `sin` and `pi`, not just pure-Python code.
 
 If a note contradicts a visible signature, trust the signature. Among multiple
 `## Notes from class` sections, the **leaf class wins**.
@@ -141,6 +157,9 @@ If the API is straightforward, skip them — they add maintenance burden.
 
 Notes accumulate across the MRO (leaf wins on conflict). Don't call `super()` —
 collection is automatic. `AgentReadableMixin` only adds IDE hints; it's not required.
+A `__agent_notes__()` that raises is silently skipped — it won't break the
+document, but its rules won't be seen either; the contract test below calls the
+method directly and catches this.
 
 ### Make notes verifiable
 
@@ -160,12 +179,13 @@ A rule worth writing down is usually worth asserting the behavior itself too
 
 ### Custom `__agent_help__()` — rarely
 
-Replaces the entire auto-generated output. Use only when you have a hand-formatted
-string to ship verbatim.
-
-**Footgun:** Never define both `__agent_help__()` and `__agent_notes__()` on one
-class — the custom help owns the output and notes are dropped. The library warns,
-but warnings get swallowed in agent shells. Treat "both defined" as a hard error.
+Replaces the auto-generated **base document** — but `__agent_notes__()` sections
+from the MRO are still appended after it. Use it for a curated base document
+while inherited notes keep flowing through; defining both is a supported
+combination. For full verbatim control of the *entire* output, don't define
+`__agent_notes__()` anywhere in the MRO — there is no other way to suppress
+notes. (On 0.2.x the notes were dropped with a warning when both were defined —
+mind the installed version when authoring shared code.)
 
 ***
 
@@ -186,7 +206,9 @@ console.log(agentHelp(someObject));       // plain object
 npm install agent-readable-ts
 ```
 
-Node 20+, no runtime dependencies.
+Node 20.6+. `typescript` ships as a runtime dependency — the CLI uses it to parse
+`.ts` source for type signatures; the programmatic `agentHelp()` is plain runtime
+reflection and never invokes it.
 
 ### CLI usage
 
@@ -197,19 +219,26 @@ npx agent-readable-ts commander
 # Document a specific export
 npx agent-readable-ts commander:Command
 
-# Local TypeScript file
+# Node builtin
+npx agent-readable-ts node:fs:ReadStream
+
+# Local TypeScript file (Node 22.18+ loads .ts natively; older runtimes need a tsx loader)
 npx agent-readable-ts ./src/widget.ts:Widget
 
-# Package not installed in the current project: opt in to on-demand fetch
+# Package not installed anywhere: opt in to on-demand fetch
 npx agent-readable-ts --install left-pad
 ```
+
+pnpm users: `pnpm dlx agent-readable-ts <target>` works the same way.
 
 The CLI mitigates TypeScript's runtime reflection limits by parsing `.ts` source
 directly or reading adjacent `.d.ts` declaration files for `.js` packages.
 
-Packages already installed in the project load directly. For anything else the
-CLI refuses to fetch unless you pass `--install`, which runs `npm install` with
-`--ignore-scripts` into an isolated cache (`~/.cache/agent-readable-ts`, override
+Packages installed in the current project resolve from its `node_modules` first —
+even in a one-off `npx` run — so project dependencies need no `--install`. For
+anything else the CLI refuses to fetch unless you pass `--install`, which runs
+`npm install` with `--ignore-scripts` into an isolated cache
+(`~/.cache/agent-readable-ts`, override
 with `AGENT_READABLE_CACHE`) — never into the project's `node_modules`. Cached
 packages load offline without needing `--install` again.
 
@@ -265,9 +294,9 @@ class DatabasePool implements AgentNoter {
 }
 ```
 
-Notes **accumulate across the inheritance chain** in parent-to-child order (TypeScript,
-unlike Python, doesn't automatically collect from the prototype chain — implement
-`agentNotes()` on each class that has cross-method rules).
+Notes **accumulate across the inheritance chain** in parent-to-child order —
+collection is automatic, like Python's MRO: implement `agentNotes()` on each
+class that has its own cross-method rules, and every class's section shows.
 
 **Belongs here:** lifecycle/ordering, preconditions, cleanup, async/Promise
 constraints, do/don't lists.
@@ -280,7 +309,8 @@ output. Use only when you have a fully hand-crafted usage guide to ship verbatim
 **Footgun:** If both `agentHelper()` and `agentNotes()` are defined on the same
 class, `agentHelper()` wins and `agentNotes()` is dropped. The library emits a
 warning via `setWarnOutput()`, but warnings can be silenced or swallowed in agent
-shells. Treat "both defined" as a hard error.
+shells. Treat "both defined" as a hard error. (Python differs: there,
+`__agent_notes__` is always appended, even after custom `__agent_help__`.)
 
 ***
 
