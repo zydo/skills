@@ -1,11 +1,11 @@
 ---
 name: session-nudge
 description: >-
-  Turn a periodic keepalive nudge on or off for the current coding-agent session (Claude Code,
+  Turn a periodic or one-time keepalive nudge on or off for the current coding-agent session (Claude Code,
   Codex CLI or Grok Build), set its pace, or show whether it is on. The nudge is a "[HH:MM:SS] Automated nudge:
   continue working ..." message that a background OS job (launchd / systemd timer / cron / Windows
   Task Scheduler) types into opted-in agent terminals, every 61 minutes by default. Use for
-  "/session-nudge on|off|enable|disable|status", "nudge every 20 minutes", "turn the nudge off
+  "/session-nudge on|off|enable|disable|status", "nudge every 20 minutes", "nudge once at 2:01 AM", "turn the nudge off
   here", "别给这个 session 发 nudge", "每半小时 nudge 一次", "给那个 codex 窗口开 nudge", "nudge my grok window too", and when setting the nudge
   up or testing it on a new machine. Sessions are off by default.
 ---
@@ -26,6 +26,7 @@ python3 <this skill's directory>/scripts/nudge.py <action> [options]
 | `off`, `disable`, "stop nudging this session" | `off` |
 | nothing, `status`, "is the nudge on?" | `status` |
 | a pace: "nudge every 20 minutes", "每半小时", "hourly", "every 1.5h" | `on --every N` |
+| "nudge once at 2:01 AM local time" | `once --at 02:01` |
 | a different terminal (e.g. a Codex or Grok Build window) | add `--pid N` |
 | "test the nudge", or first use on a machine | `test` |
 | change the default pace for new opt-ins | `install --interval N` |
@@ -37,12 +38,14 @@ Convert it to whole minutes yourself: "half an hour" -> 30, "every 2 hours"
 `on` keeps the session's existing pace, else the default (61). The pace is per
 session: other sessions keep theirs.
 
+`once --at HH:MM` schedules the next local occurrence, or tomorrow if today's time has passed. The scheduler delivers it once and removes the entry. `off` also cancels a scheduled one-time nudge.
+
 Report the helper's one-line result. Do not edit the scheduler job, the state
 files or the templates by hand; the helper is the interface.
 
 ## First run on a machine: ask, then test
 
-`status`, `on`, `install` and `test` first make sure the background job
+`status`, `on`, `once`, `install` and `test` first make sure the background job
 exists and matches this skill's location, creating it from `templates/` for
 the current OS if not (`off` never installs anything). Until an end-to-end
 `test` has passed on this machine, their output also contains setup

@@ -14,7 +14,7 @@ npx skills add zydo/skills --skill agent-readable
 
 ### [session-nudge](skills/session-nudge/)
 
-For Claude Code, Codex CLI and Grok Build on macOS, Linux and Windows. A background OS job types a periodic "continue working" nudge into the terminals of opted-in agent sessions, so long-running sessions keep going instead of idling. Turn it on or off per session, set each session's pace in plain language ("nudge every 20 minutes"), and let the first run install the scheduler job (launchd, systemd timer or cron, Task Scheduler) and verify delivery end to end.
+For Claude Code, Codex CLI and Grok Build on macOS, Linux and Windows. A background OS job types a periodic "continue working" nudge into the terminals of opted-in agent sessions, so long-running sessions keep going instead of idling. Turn it on or off per session, set each session’s pace in plain language ("nudge every 20 minutes"), schedule one reminder at a local time, and let the first run install the scheduler job (launchd, systemd timer or cron, Task Scheduler) and verify delivery end to end.
 
 ```
 npx skills add zydo/skills --skill session-nudge

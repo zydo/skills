@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Periodic keepalive nudge for coding-agent terminals (Claude Code, Codex CLI, Grok Build).
+"""Keepalive nudges for coding-agent terminals (Claude Code, Codex CLI, Grok Build).
 
 A background job from the OS scheduler (launchd on macOS, a systemd user timer
 or cron on Linux, Task Scheduler on Windows) runs `nudge.py fire` every minute;
@@ -9,6 +9,7 @@ opts the current one in by its TUI PID, so an opt-in ends with its process and
 never sticks to a terminal that a later session reuses.
 
 usage: nudge.py [status|enable|on|disable|off] [--every MINUTES] [--pid N]
+       nudge.py once --at HH:MM [--pid N]
        nudge.py install [--interval DEFAULT_MINUTES] [--elevated] | uninstall
        nudge.py test [--channel tmux|wezterm|iterm2|console] [--pid N]
        nudge.py fire                      (what the scheduler runs each minute)
@@ -167,6 +168,45 @@ def claude_sessions() -> list[dict]:
     return out
 
 
+def process_cwd(pid: int) -> str | None:
+    """Read a process cwd on platforms that expose it."""
+    if SYSTEM == "Darwin":
+        result = run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+        if result.returncode:
+            return None
+        for line in result.stdout.splitlines():
+            if line.startswith("n"):
+                return os.path.realpath(line[1:])
+    elif SYSTEM == "Linux":
+        try:
+            return os.path.realpath(f"/proc/{pid}/cwd")
+        except OSError:
+            return None
+    return None
+
+
+def agent_tuis_in_cwd(cwd: str) -> list[tuple[int, str]]:
+    """Find agent TUI processes in cwd when called from an API worker."""
+    if WINDOWS:
+        return []
+    result = run(["ps", "-axo", "pid=,tty=,command=", "-ww"])
+    candidates = []
+    if result.returncode:
+        return candidates
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        pid_text, tty_text, command = parts
+        if not pid_text.isdigit() or "?" in tty_text or not AGENT_RE.search(command):
+            continue
+        pid = int(pid_text)
+        process = proc(pid)
+        if process and process["tty"] and process_cwd(pid) == cwd:
+            candidates.append((pid, process["tty"]))
+    return sorted(candidates)
+
+
 def find_target(explicit: int | None) -> tuple[int, str] | None:
     """(pid, tty) of the agent TUI whose terminal shows this session; None after printing why."""
     if explicit:
@@ -223,18 +263,27 @@ def find_target(explicit: int | None) -> tuple[int, str] | None:
         )
         return None
 
-    print(
-        "Not inside a claude, codex or grok terminal session, so no terminal is selected. "
-        "Pass --pid N (a claude, codex or grok TUI pid) to choose one; no change made."
-    )
+    # API/tool workers are not necessarily children of the visible agent TUI.
+    # Match by project cwd instead, and refuse to guess if multiple terminals fit.
+    cwd = os.path.realpath(os.getcwd())
+    tuis = agent_tuis_in_cwd(cwd)
+    if len(tuis) == 1:
+        return tuis[0]
+    if tuis:
+        print(f"Several agent terminals are open in {cwd}; rerun with --pid:")
+        for pid, tty in tuis:
+            print(f"  --pid {pid}  ({tty})")
+        return None
+    print(f"Not inside an agent terminal and no agent TUI was found in {cwd}; no change made.")
     return None
 
 
 # --- opt-in list ----------------------------------------------------------------
 
 
-def listed(path: Path = INCLUDE) -> dict[int, dict[str, str]]:
+def listed(path: Path | None = None) -> dict[int, dict[str, str]]:
     """PID -> its key=value fields; other words on a line are ignored."""
+    path = INCLUDE if path is None else path
     entries = {}
     if path.exists():
         for line in path.read_text().splitlines():
@@ -264,6 +313,36 @@ def every(fields: dict[str, str]) -> int:
         return max(1, int(fields.get("every", "")))
     except ValueError:
         return int(config()["interval_minutes"])
+
+
+def next_local_time(at: str, now: float | None = None) -> int:
+    """Epoch for the next local HH:MM, or tomorrow if today's time passed."""
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", at):
+        raise ValueError("time must be in 24-hour HH:MM form")
+    hour, minute = map(int, at.split(":"))
+    now = time.time() if now is None else now
+    local = time.localtime(now)
+    candidate = time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
+                             hour, minute, 0, -1, -1, -1))
+    if candidate <= now:
+        tomorrow = datetime.fromtimestamp(now).date() + timedelta(days=1)
+        candidate = time.mktime((tomorrow.year, tomorrow.month, tomorrow.day,
+                                 hour, minute, 0, -1, -1, -1))
+    return int(candidate)
+
+
+def schedule_once(pid: int, tty: str, at: int) -> None:
+    """Replace this TUI's recurring opt-in with one scheduled delivery."""
+    with state_lock() as locked:
+        if not locked:
+            raise RuntimeError("The nudge state is busy; try again in a minute.")
+        entries = listed()
+        entries[pid] = {"once_at": str(at), "tty": tty}
+        if not WINDOWS:
+            for other in [q for q, fields in entries.items()
+                          if q != pid and fields.get("tty") == tty]:
+                del entries[other]
+        write_listed(entries)
 
 
 # --- delivery ---------------------------------------------------------------------
@@ -486,11 +565,24 @@ def fire_locked() -> None:
         sessions = listed(TEST_REQUEST)
         TEST_REQUEST.unlink()
         due = list(sessions)
+        due_fields = {pid: sessions[pid].copy() for pid in due}
         log(f"--- test fire for pid {', '.join(map(str, due))}")
     else:
         sessions = listed()
-        due, changed = [], False
-        for pid, f in sessions.items():
+        due, due_fields, changed = [], {}, False
+        for pid, f in list(sessions.items()):
+            if "once_at" in f:
+                try:
+                    at = float(f["once_at"])
+                except ValueError:
+                    log(f"pid {pid}: invalid one-time schedule -- removed")
+                    del sessions[pid]
+                    changed = True
+                    continue
+                if now >= at:
+                    due.append(pid)
+                    due_fields[pid] = f.copy()
+                continue
             try:
                 last = float(f["last"])
             except (KeyError, ValueError):  # no record yet: start its clock now
@@ -498,21 +590,25 @@ def fire_locked() -> None:
                 continue
             if now - last >= every(f) * 60 - 30:  # ticks are ~60s apart
                 due.append(pid)
+                due_fields[pid] = f.copy()
         if not due:
             if changed:
                 write_listed(sessions)
             return
         for pid in due:
-            sessions[pid]["last"] = str(int(now))
+            if "once_at" in sessions[pid]:
+                del sessions[pid]
+            else:
+                sessions[pid]["last"] = str(int(now))
         write_listed(sessions)
         log(f"--- firing for pid {', '.join(map(str, due))}")
 
     # Sessions with the same pace share one message (its "next" time). A
     # terminal is nudged at most once per tick, even if several opted-in PIDs
     # (or paces) point at it.
-    groups: dict[int, dict[str, int]] = {}
+    groups: dict[tuple[int, bool], dict[str, int]] = {}
     seen: set[str] = set()
-    for pid in sorted(due, key=lambda q: every(sessions[q])):
+    for pid in sorted(due, key=lambda q: ("once_at" in due_fields[q], every(due_fields[q]))):
         p = is_agent_tui(pid)
         if p:
             key = p["tty"] if not WINDOWS else str(pid)
@@ -520,14 +616,16 @@ def fire_locked() -> None:
                 log(f"pid {pid}: terminal {key} already nudged this tick -- skipped")
                 continue
             seen.add(key)
-            groups.setdefault(every(sessions[pid]), {})[key] = pid
+            group = (every(due_fields[pid]), "once_at" in due_fields[pid])
+            groups.setdefault(group, {})[key] = pid
         else:
             log(f"pid {pid}: gone or not a claude/codex/grok terminal -- skipped")
     stamp = datetime.now().astimezone()
-    for minutes, targets in groups.items():
+    for (minutes, one_time), targets in groups.items():
         message = cfg["message"].format(
             now=stamp.strftime("%H:%M:%S %Z"),
-            next=(stamp + timedelta(minutes=minutes)).strftime("%H:%M:%S %Z"),
+            next=("none (one-time nudge)" if one_time else
+                  (stamp + timedelta(minutes=minutes)).strftime("%H:%M:%S %Z")),
         )
         if WINDOWS:
             for pid in targets.values():
@@ -1140,7 +1238,16 @@ def main() -> None:
         if not installed():
             print(f"Scheduler job was missing or out of date; installed {install()}.")
         sys.exit(0 if e2e_test(opt("--channel"), pid) else 1)
-    if action not in ("status", "enable", "disable"):
+    once_at = None
+    if action == "once":
+        at = opt("--at")
+        if not at:
+            sys.exit("once needs --at HH:MM (local time)")
+        try:
+            once_at = next_local_time(at)
+        except ValueError as error:
+            sys.exit(str(error))
+    if action not in ("status", "enable", "disable", "once"):
         sys.exit(__doc__.strip())
     # Turning a nudge off must not install a background job or start setup.
     if action != "disable":
@@ -1155,6 +1262,14 @@ def main() -> None:
     if not found:
         return
     pid, tty = found
+    if action == "once":
+        try:
+            schedule_once(pid, tty, once_at)
+        except RuntimeError as error:
+            sys.exit(str(error))
+        when = datetime.fromtimestamp(once_at).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        print(f"One-time keepalive nudge for terminal {tty} (pid {pid}): scheduled for {when}.")
+        return
     if action in ("enable", "disable"):
         with state_lock() as locked:
             if not locked:
@@ -1162,6 +1277,7 @@ def main() -> None:
             entries = listed()
             if action == "enable":
                 f = entries.get(pid, {})
+                f.pop("once_at", None)
                 f["every"] = pace or f.get("every") or str(config()["interval_minutes"])
                 f.setdefault("last", str(int(time.time())))  # first nudge one interval from now
                 f["tty"] = tty
@@ -1190,6 +1306,10 @@ def main() -> None:
         else f"this session (terminal {tty}, {name} pid {pid})"
     )
     if f:
+        if "once_at" in f:
+            when = datetime.fromtimestamp(float(f["once_at"])).astimezone()
+            print(f"One-time nudge for {who}: scheduled for {when:%Y-%m-%d %H:%M %Z}.")
+            return
         nxt = datetime.fromtimestamp(float(f.get("last", time.time())) + every(f) * 60)
         print(
             f"Keepalive nudge for {who}: enabled, every {every(f)} min; next around {nxt:%H:%M}."
