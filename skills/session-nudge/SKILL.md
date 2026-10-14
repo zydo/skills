@@ -94,6 +94,16 @@ instead (the nudge text really lands in that session).
   sticks to a terminal a later session reuses. `nudge.log` there records every
   delivery and skip; `config.json` holds the default pace and the message
   (`{now}` and `{next}` are filled in).
+- Cleanup is lazy, by design; there is no session-exit hook. A dead session's
+  entry is dropped by the rewrite at its first due tick after the process
+  ends -- at most one interval later, costing one "gone -- skipped" log line.
+  An exit hook would be the weaker mechanism anyway: it does not run on
+  crashes, kills or closed windows, so the liveness filter would still be
+  required as the backstop; end-of-conversation events do not line up with
+  end-of-opt-ins (a cleared conversation or a terminal hosting several
+  sessions must keep its opt-in, because the opt-in follows the TUI process,
+  not the conversation); and not every supported agent has such a hook, so
+  liveness at delivery time is both the correctness check and the cleanup.
 - Delivery: tmux `send-keys`, WezTerm `cli send-text`, iTerm2 AppleScript
   (macOS), console input injection (Windows). Text first, then CR after 0.5s
   and again after 1s: Claude Code treats a CR in the same burst as pasted
