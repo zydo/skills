@@ -38,7 +38,7 @@ Convert it to whole minutes yourself: "half an hour" -> 30, "every 2 hours"
 `on` keeps the session's existing pace, else the default (61). The pace is per
 session: other sessions keep theirs.
 
-`once --at HH:MM` schedules the next local occurrence, or tomorrow if today's time has passed. The scheduler delivers it once and removes the entry. `off` also cancels a scheduled one-time nudge.
+`once --at HH:MM` schedules the next local occurrence at `HH:MM:00`, or tomorrow if today's time has passed. The scheduler ticks on whole minutes so requests without explicit seconds do not drift to a later second. It delivers once and removes the entry. `off` also cancels a scheduled one-time nudge.
 
 Report the helper's one-line result. Do not edit the scheduler job, the state
 files or the templates by hand; the helper is the interface.
