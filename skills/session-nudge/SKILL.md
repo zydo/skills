@@ -90,6 +90,25 @@ skipped until the agent is restarted inside a supported terminal (`tmux
 new -s <name>`, then start the agent there). Say this explicitly when
 reporting, so PASS is not read as "this session will be nudged".
 
+## Restarts and resumed sessions
+
+Two cases to check before trusting a delivery:
+
+- **Every restart kills the opt-in.** Opt-ins are keyed by the TUI process,
+  so a restart of Claude Code — `--resume`, `--fork-session`, a crash —
+  starts a new PID with no opt-in, and `status` reports disabled even though
+  the user set a pace earlier. Run `on` again in each new session the user
+  wants nudged; do not assume an earlier setup carries over.
+- **Resumed/forked sessions are daemon-hosted and cannot receive nudges.**
+  A session resumed with `--resume --fork-session` runs under a `claude
+  bg-pty-host` parent with a daemon-created pty: no tmux or WezTerm pane
+  hosts it (`$TMUX` unset on the CLI process, `tmux list-panes` finds no
+  server), and there is no supported terminal to type into, so every
+  delivery is skipped. Diagnose with `ps -o ppid= -p <claude pid>` (the
+  parent names `claude bg-pty-host`). Only a session started inside tmux or
+  another supported terminal can be nudged; tell the user this when they
+  report that a pace they set earlier "isn't working".
+
 ## How it works
 
 - Scheduler: launchd agent `local.session-nudge` (macOS), systemd user timer
