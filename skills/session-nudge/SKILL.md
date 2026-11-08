@@ -73,12 +73,22 @@ questions:
 - Windows: register the task with highest privileges when agents run in an
   elevated terminal.
 - Any OS: this terminal cannot be typed into -> run agent sessions in tmux,
-  WezTerm (or iTerm2 on macOS).
+  WezTerm (or iTerm2 on macOS). Before installing anything, check whether the
+  terminal is already present (`command -v tmux`); it often is, and then the
+  right move is just `test`.
 
 `test` opens a throwaway terminal (tmux, WezTerm, iTerm2 window or Windows
 console), has the real scheduler job fire at it, and checks the message
 arrived and was submitted. `test --pid N` targets an existing agent terminal
 instead (the nudge text really lands in that session).
+
+A PASS proves the scheduler-to-terminal pipeline only: the throwaway window
+is the test's own, so it says nothing about the session that was just
+enabled. If that session sits on a plain pts (the common case for a Claude
+Code run outside tmux), its nudges fire each interval but are delivered as
+skipped until the agent is restarted inside a supported terminal (`tmux
+new -s <name>`, then start the agent there). Say this explicitly when
+reporting, so PASS is not read as "this session will be nudged".
 
 ## How it works
 
