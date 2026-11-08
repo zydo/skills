@@ -450,6 +450,140 @@ end timeout"""
     return sent
 
 
+def _session_id_of(pid: int) -> str:
+    """The --session-id argument of a claude TUI process, if any."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = f.read().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return ""
+    for i, a in enumerate(args):
+        if a == "--session-id" and i + 1 < len(args):
+            return args[i + 1]
+    return ""
+
+
+def _pty_sock_token(pid: int) -> str:
+    """For daemon-hosted TUIs: the session token in an ancestor's
+    cc-daemon pty socket path (/tmp/.../pty/<uuid>.sock)."""
+    p = pid
+    for _ in range(5):
+        try:
+            with open(f"/proc/{p}/cmdline", "rb") as f:
+                args = f.read().decode("utf-8", "replace").replace("\0", " ")
+        except OSError:
+            break
+        m = re.search(r"/pty/([0-9a-f-]+\.sock)", args)
+        if m:
+            return m.group(1)
+        try:
+            p = int(run(["ps", "-o", "ppid=", "-p", str(p)]).stdout.strip())
+        except ValueError:
+            break
+    return ""
+
+
+def _viewer_sockets(pid: int) -> str:
+    """All unix socket paths the process holds, from ss -xp."""
+    out = run(["ss", "-xp"])
+    hits = []
+    for line in out.stdout.splitlines():
+        if re.search(rf'pid={pid},', line):
+            m = re.search(r'(/tmp/\S+\.sock)', line)
+            if m:
+                hits.append(m.group(1))
+    return " ".join(hits)
+
+
+def deliver_screen(targets: dict[str, int], message: str) -> set[str]:
+    """GNU screen: both direct TUIs in a window and hosted-viewer sessions.
+
+    A resumed (`--resume --fork-session`) or background-hosted Claude session
+    runs its TUI on a daemon-created pty no terminal multiplexer owns, but a
+    viewer client inside a GNU screen window relays keystrokes to it.
+    Matching: a target whose tty IS a screen window tty is delivered into
+    that session directly; otherwise the viewer client whose process holds
+    the target's cc-daemon pty socket (its path names the session) is used.
+    Same-cwd is never enough on its own — several sessions can share a cwd.
+    Single-window screen sessions only: window ttys are not enumerable from
+    outside, so with several windows the right one cannot be picked safely.
+    """
+    sent = set()
+    if shutil.which("screen") is None:
+        return sent
+    plans: dict[str, list[tuple[str, str]]] = {}  # screen session -> [(target tty, window note)]
+    target_meta: dict[str, tuple[int, str]] = {}  # target tty -> (pid, sock token)
+    for tty, pid in targets.items():
+        target_meta[tty] = (pid, _pty_sock_token(pid))
+    ls = run(["screen", "-ls"])
+    for line in ls.stdout.splitlines():
+        m = re.match(r"\t(\S+)\t\(", line)
+        if not m:
+            continue
+        # Detached sessions are delivered into too: their windows and the
+        # agent TUIs inside them are alive even with nobody watching.
+        name = m.group(1)
+        screen_pid = name.split(".", 1)[0]
+        if not screen_pid.isdigit():
+            continue
+        windows = run(["screen", "-S", name, "-Q", "windows"]).stdout.splitlines()
+        if len(windows) != 1:
+            log(
+                f"screen {name}: {len(windows)} windows -- skipped"
+                " (single-window sessions only)"
+            )
+            continue
+        window_ttys = set()
+        for proc_line in run(["ps", "-eo", "pid=,ppid=,tty=,cmd="]).stdout.splitlines():
+            parts = proc_line.strip().split(None, 3)
+            if len(parts) >= 3 and parts[1] == screen_pid and re.match(r"pts/", parts[2]):
+                window_ttys.add(parts[2].removeprefix("/dev/"))
+        viewers = []  # (tty, cwd, session id hint from socket)
+        for proc_line in run(["ps", "-eo", "pid=,ppid=,tty=,cmd="]).stdout.splitlines():
+            parts = proc_line.strip().split(None, 3)
+            if len(parts) < 4 or parts[2].removeprefix("/dev/") not in window_ttys:
+                continue
+            if not re.search(r"\b(claude|codex|grok)\b", parts[3]):
+                continue
+            try:
+                viewers.append((parts[2].removeprefix("/dev/"), process_cwd(int(parts[0])), int(parts[0])))
+            except ValueError:
+                continue
+        for target_tty, (target_pid, sock_token) in target_meta.items():
+            if target_tty in sent:
+                continue
+            chosen_viewer = None
+            direct = target_tty.removeprefix("/dev/") in window_ttys
+            if direct:
+                chosen_viewer = ("direct", "", 0)
+            else:
+                target_sid = _session_id_of(target_pid)
+                for v_tty, v_cwd, v_pid in viewers:
+                    if v_tty == target_tty:
+                        continue
+                    if _session_id_of(v_pid) == target_sid and target_sid:
+                        chosen_viewer = ("sid", v_tty, v_pid)
+                        break
+                if chosen_viewer is None and sock_token:
+                    for v_tty, v_cwd, v_pid in viewers:
+                        if sock_token in _viewer_sockets(v_pid):
+                            chosen_viewer = ("sock", v_tty, v_pid)
+                            break
+            if chosen_viewer is None:
+                log(f"screen {name}: no viewer of target {target_tty} found -- skipped")
+                continue
+            if run(["screen", "-S", name, "-p", "0", "-X", "stuff", message]).returncode:
+                continue
+            time.sleep(0.5)
+            run(["screen", "-S", name, "-p", "0", "-X", "stuff", "\r"])
+            time.sleep(1)
+            run(["screen", "-S", name, "-p", "0", "-X", "stuff", "\r"])
+            sent.add(target_tty)
+            log(f"screen {name} ({chosen_viewer[0]} -> {target_tty}): sent")
+    return sent
+    return sent
+
+
 def deliver_console(pid: int, message: str) -> bool:
     """Windows: write key events into the console input buffer of pid."""
     import ctypes
@@ -632,13 +766,13 @@ def fire_locked() -> None:
                 deliver_console(pid, message)
             continue
         left = dict(targets)
-        for channel in (deliver_tmux, deliver_wezterm, deliver_iterm2):
+        for channel in (deliver_tmux, deliver_wezterm, deliver_iterm2, deliver_screen):
             if left:
                 for tty in channel(left, message):
                     left.pop(tty, None)
         for tty, pid in left.items():
             log(
-                f"{tty} (pid {pid}): no delivery channel (not tmux, WezTerm or iTerm2) -- skipped"
+                f"{tty} (pid {pid}): no delivery channel (not tmux, screen, WezTerm or iTerm2) -- skipped"
             )
 
 

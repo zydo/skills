@@ -99,15 +99,18 @@ Two cases to check before trusting a delivery:
   starts a new PID with no opt-in, and `status` reports disabled even though
   the user set a pace earlier. Run `on` again in each new session the user
   wants nudged; do not assume an earlier setup carries over.
-- **Resumed/forked sessions are daemon-hosted and cannot receive nudges.**
+- **Resumed/forked sessions are daemon-hosted; they need a screen viewer.**
   A session resumed with `--resume --fork-session` runs under a `claude
-  bg-pty-host` parent with a daemon-created pty: no tmux or WezTerm pane
-  hosts it (`$TMUX` unset on the CLI process, `tmux list-panes` finds no
-  server), and there is no supported terminal to type into, so every
+  bg-pty-host` parent with a daemon-created pty: no multiplexer pane hosts
+  the TUI itself (`$TMUX` unset, `tmux list-panes` finds no server). The
+  user watches it through a viewer client, and if that viewer runs inside a
+  GNU screen window, the screen channel delivers into the viewer and the
+  keystrokes relay to the session — the viewer is matched by the cc-daemon
+  pty socket it holds, whose path names the session, never by cwd alone
+  (several sessions share a cwd). Without such a screen window every
   delivery is skipped. Diagnose with `ps -o ppid= -p <claude pid>` (the
-  parent names `claude bg-pty-host`). Only a session started inside tmux or
-  another supported terminal can be nudged; tell the user this when they
-  report that a pace they set earlier "isn't working".
+  parent names `claude bg-pty-host`); tell the user this when they report
+  that a pace they set earlier "isn't working".
 
 ## How it works
 
@@ -133,8 +136,9 @@ Two cases to check before trusting a delivery:
   sessions must keep its opt-in, because the opt-in follows the TUI process,
   not the conversation); and not every supported agent has such a hook, so
   liveness at delivery time is both the correctness check and the cleanup.
-- Delivery: tmux `send-keys`, WezTerm `cli send-text`, iTerm2 AppleScript
-  (macOS), console input injection (Windows). Text first, then CR after 0.5s
+- Delivery: tmux `send-keys`, GNU screen `stuff`, WezTerm `cli send-text`,
+  iTerm2 AppleScript (macOS), console input injection (Windows). Text first,
+  then CR after 0.5s
   and again after 1s: Claude Code treats a CR in the same burst as pasted
   text, and the second CR is a no-op on an empty composer. Other terminals
   (Terminal.app, GNOME Terminal, VS Code's terminal without tmux) cannot be
